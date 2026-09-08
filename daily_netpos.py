@@ -214,7 +214,9 @@ def write_files(reading, rows, hist, status=None, feed_path=None):
     ws.auto_filter.ref = ws.dimensions          # Excel dropdown filters on header
     ws.freeze_panes = "B2"                       # keep symbol col + header visible
 
-    _add_strike_sheets(wb, feed_path)
+    ws_strat = _add_strike_sheets(wb, feed_path)
+    if ws_strat is not None:      # small, text-only -> uploadable to Drive
+        _write_sheet_csv(ws_strat, os.path.join(OUT_DIR, f"strategy {name}.csv"))
 
     xlsx_path = os.path.join(OUT_DIR, f"netpos {name}.xlsx")
     wb.save(xlsx_path)
@@ -249,6 +251,14 @@ def _add_strike_sheets(wb, feed_path):
     for w in (ws2, ws3):
         w.auto_filter.ref = w.dimensions
         w.freeze_panes = "B2"
+    return ws3
+
+
+def _write_sheet_csv(ws, path):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        for row in ws.iter_rows(values_only=True):
+            w.writerow(["" if v is None else v for v in row])
 
 
 def run(feed_path, reading, do_archive=True, prev_strike_tag=None,
