@@ -164,7 +164,7 @@ HEADERS = ["symbol", "sector", "LTP", "fut_net(w1)", "call_net(wtd)",
            "fut_d", "callW_d", "putW_d", "pos_col15", "reconcile(NEW-col15)"]
 
 
-def write_files(reading, rows, hist, status=None):
+def write_files(reading, rows, hist, status=None, feed_path=None):
     status = status or {}
     os.makedirs(OUT_DIR, exist_ok=True)
     wb = openpyxl.Workbook()
@@ -213,9 +213,42 @@ def write_files(reading, rows, hist, status=None):
     cf.close()
     ws.auto_filter.ref = ws.dimensions          # Excel dropdown filters on header
     ws.freeze_panes = "B2"                       # keep symbol col + header visible
+
+    _add_strike_sheets(wb, feed_path)
+
     xlsx_path = os.path.join(OUT_DIR, f"netpos {name}.xlsx")
     wb.save(xlsx_path)
     return xlsx_path, csv_path
+
+
+def _add_strike_sheets(wb, feed_path):
+    """Sheet 2: every strike, moneyness-weighted.  Sheet 3: the contrarian
+    option structure each stock's strike map implies."""
+    if not feed_path:
+        return
+    import strike_analysis as SA
+    strikes = SA.load_strike(feed_path)
+    ltp = SA.load_ltp(feed_path)
+
+    ws2 = wb.create_sheet("strikes weighted")
+    ws2.append(SA.WEIGHTED_HEADERS)
+    ws3 = wb.create_sheet("option strategy")
+    ws3.append(SA.STRATEGY_HEADERS)
+
+    for sym in sorted(strikes):
+        spot = ltp.get(sym)
+        if not spot:
+            continue
+        for row in SA.weighted_rows(sym, strikes[sym], spot):
+            ws2.append(row)
+        s = SA.suggest_strategy(sym, strikes[sym], spot)
+        ws3.append([s["symbol"], s["spot"], s["floor"], s["ceiling"],
+                    s["retail_dir"], s["activity"], s["read"], s["strategy"],
+                    s["legs"], s["alt"], s["caution"]])
+
+    for w in (ws2, ws3):
+        w.auto_filter.ref = w.dimensions
+        w.freeze_panes = "B2"
 
 
 def run(feed_path, reading, do_archive=True, prev_strike_tag=None,
@@ -223,7 +256,7 @@ def run(feed_path, reading, do_archive=True, prev_strike_tag=None,
     rows = compute(feed_path)
     hist = _load_hist()
     status = _model_status(feed_path, prev_strike_tag) if with_status else {}
-    xlsx, csvp = write_files(reading, rows, hist, status)
+    xlsx, csvp = write_files(reading, rows, hist, status, feed_path)
     if do_archive:
         _append_hist(reading, rows)
     return rows, xlsx, csvp

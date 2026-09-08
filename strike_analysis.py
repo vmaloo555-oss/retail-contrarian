@@ -206,6 +206,129 @@ def verdict(b):
     return f"{lo} - {hi}   [{'; '.join(tags) or 'no clear structure'}]"
 
 
+def weighted_rows(symbol, strikes, spot, min_net=MIN_NET):
+    """Flat per-strike rows with the moneyness weighting applied, for the
+    `strikes` sheet. One row per symbol x strike."""
+    bc = flag_broker_calls(strikes, spot)
+    out = []
+    for k in sorted(strikes):
+        if k == 0:
+            continue
+        d = strikes[k]
+        cw, pw = mny_weight(k, spot, "C"), mny_weight(k, spot, "P")
+        netc, netp = d["co_b"] - d["co_s"], d["po_b"] - d["po_s"]
+        wc, wp = netc * cw, netp * pw
+        if k in bc:
+            note = "BROKER-CALL cluster (omitted)"
+        elif k > spot and wc >= min_net:
+            note = "retail long calls -> ceiling"
+        elif k > spot and wc <= -min_net:
+            note = "retail short calls -> breakout up"
+        elif k < spot and wp >= min_net:
+            note = "retail long puts -> floor"
+        elif k < spot and wp <= -min_net:
+            note = "retail short puts -> break down"
+        else:
+            note = ""
+        out.append([symbol, spot, k, round((k - spot) / spot * 100, 1) if spot else None,
+                    round(cw, 3), round(pw, 3),
+                    d["co_b"], d["co_s"], netc, round(wc, 2),
+                    d["po_b"], d["po_s"], netp, round(wp, 2), note])
+    return out
+
+
+WEIGHTED_HEADERS = ["symbol", "spot", "strike", "vs_spot_%", "call_wt", "put_wt",
+                    "callB", "callS", "netC", "wNetC",
+                    "putB", "putS", "netP", "wNetP", "note"]
+
+
+def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET):
+    """Deterministic contrarian option structure implied by the strike map.
+
+    Every retail position is faded -- retail long calls/puts decay (walls),
+    retail short calls/puts get run over (breaks). This is mechanical output
+    from the positioning, NOT a market opinion, and the operator places any
+    order themselves. Structures are defined-risk spreads by default.
+    """
+    bc = flag_broker_calls(strikes, spot)
+    b = band(symbol, strikes, spot, min_net, exclude=set(bc))
+    ks = sorted(k for k in strikes if k > 0 and k not in bc)
+    res = dict(symbol=symbol, spot=spot, floor=b["floor"], ceiling=b["ceiling"],
+               retail_dir=round(b["retail_dir"], 2),
+               activity=round(abs(b["call_bias"]) + abs(b["put_bias"]), 2),
+               read="", strategy="none", legs="", alt="", caution="")
+    if not ks:
+        res["read"] = "no option chain"
+        return res
+    act = res["activity"]
+    if act < 3:
+        res["read"] = "chain too thin to fade"
+        res["caution"] = "thin chain - ignore"
+        return res
+
+    wc = {k: (strikes[k]["co_b"] - strikes[k]["co_s"]) * mny_weight(k, spot, "C")
+          for k in ks}
+    wp = {k: (strikes[k]["po_b"] - strikes[k]["po_s"]) * mny_weight(k, spot, "P")
+          for k in ks}
+    above = [k for k in ks if k >= spot]
+    below = [k for k in ks if k <= spot]
+    atm_up = above[0] if above else None
+    atm_dn = below[-1] if below else None
+    # short-side walls must sit STRICTLY beyond the long leg, or the "spread"
+    # collapses to a single strike (zero width, no trade).
+    short_calls = [k for k in above
+                   if wc[k] <= -min_net and atm_up is not None and k > atm_up]
+    short_puts = [k for k in below
+                  if wp[k] <= -min_net and atm_dn is not None and k < atm_dn]
+    rd = b["retail_dir"]
+
+    if rd > 0:                       # retail leaning bearish -> fade -> BULLISH
+        res["read"] = "retail net bearish on options -> contrarian BULLISH"
+        if short_calls:
+            tgt = min(short_calls, key=lambda k: wc[k])   # biggest short-call cluster
+            res["strategy"] = "Bull call spread - fade retail's short calls"
+            res["legs"] = f"Buy {atm_up:g} CE / Sell {tgt:g} CE"
+        elif b["ceiling"] and atm_up and b["ceiling"] > atm_up:
+            res["strategy"] = "Bull call spread - capped at retail's long-call wall"
+            res["legs"] = f"Buy {atm_up:g} CE / Sell {b['ceiling']:g} CE"
+        elif atm_up:
+            res["strategy"] = "Long call"
+            res["legs"] = f"Buy {atm_up:g} CE"
+        if b["floor"] and atm_dn and b["floor"] < atm_dn:
+            res["alt"] = f"Bull put spread: Sell {atm_dn:g} PE / Buy {b['floor']:g} PE"
+    elif rd < 0:                     # retail leaning bullish -> fade -> BEARISH
+        res["read"] = "retail net bullish on options -> contrarian BEARISH"
+        if short_puts:
+            tgt = min(short_puts, key=lambda k: wp[k])    # biggest short-put cluster
+            res["strategy"] = "Put debit spread - fade retail's short puts"
+            res["legs"] = f"Buy {atm_dn:g} PE / Sell {tgt:g} PE"
+        elif b["floor"] and atm_dn and b["floor"] < atm_dn:
+            res["strategy"] = "Put debit spread - down to retail's long-put floor"
+            res["legs"] = f"Buy {atm_dn:g} PE / Sell {b['floor']:g} PE"
+        elif atm_dn:
+            res["strategy"] = "Long put"
+            res["legs"] = f"Buy {atm_dn:g} PE"
+        if b["ceiling"] and atm_up and b["ceiling"] >= atm_up:
+            nxt = next((k for k in above if k > b["ceiling"]), None)
+            res["alt"] = (f"Bear call spread: Sell {b['ceiling']:g} CE"
+                          + (f" / Buy {nxt:g} CE" if nxt else " (uncapped - add a long call)"))
+    else:
+        res["read"] = "options neutral"
+
+    if not res["legs"]:
+        res["strategy"] = "none"
+        res["caution"] = "no usable strikes on the required side"
+    if bc:
+        res["caution"] = (res["caution"] + "; " if res["caution"] else "") + \
+            "broker-call cluster omitted at " + ", ".join(f"{k:g}" for k in sorted(bc))
+    return res
+
+
+STRATEGY_HEADERS = ["symbol", "spot", "floor", "ceiling", "retail_dir",
+                    "opt_activity", "contrarian read", "strategy", "legs",
+                    "alternative", "caution"]
+
+
 def snapshot(path, reading_tag):
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     data = load_strike(path)
