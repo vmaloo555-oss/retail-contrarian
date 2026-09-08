@@ -89,7 +89,7 @@ def artifacts(tag):
     return [
         ("strike snapshot", os.path.join(SA.ARCHIVE_DIR, f"{tag}.csv"), "repo"),
         ("weighted netpos xlsx", os.path.join(DN.OUT_DIR, f"netpos_{tag}.xlsx"), "drive"),
-        ("weighted netpos csv", os.path.join(DN.OUT_DIR, f"netpos_{tag}.csv"), "drive"),
+        ("weighted netpos csv", os.path.join(DN.OUT_DIR, f"netpos_{tag}.csv"), "repo"),
         ("model preview", os.path.join(DN.OUT_DIR, f"preview_{tag}.txt"), "drive"),
     ]
 

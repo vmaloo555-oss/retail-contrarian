@@ -40,7 +40,7 @@ Tag = `YYYY-MM-DD_HHMM` (`1130` = 11:30 file, `1430` = 2:30 decision file).
 ## After each run
 1. Commit the accumulation record — `archive/` (price archive, netpos history,
    per-reading strike snapshots) and `output/`.
-2. Upload `output/netpos_<tag>.{xlsx,csv}` and `output/preview_<tag>.txt` to the
+2. Upload `output/netpos_<tag>.xlsx` and `output/preview_<tag>.txt` to the
    Drive folder "retail-contrarian-system". `daily_run.py` prints the exact list;
    it has no Drive credentials of its own, so the upload is a separate step.
 
