@@ -73,7 +73,7 @@ def price_readings_count():
 
 
 def write_preview(feed_path, tag, prev_tag):
-    path = os.path.join(DN.OUT_DIR, f"preview_{tag}.txt")
+    path = os.path.join(DN.OUT_DIR, f"preview {DN.display_name(tag)}.txt")
     buf = io.StringIO()
     try:
         out = M.run(feed_path, strike_feed=feed_path, prev_strike_tag=prev_tag)
@@ -82,7 +82,8 @@ def write_preview(feed_path, tag, prev_tag):
         open(path, "w").write(buf.getvalue())
         return path
     nt = out["nifty_trend"]
-    buf.write(f"# QUIET MODEL PREVIEW {tag} -- NOT FOR TRADING (accumulation week)\n")
+    buf.write(f"# QUIET MODEL PREVIEW {DN.display_name(tag)}  ({tag})"
+              f" -- NOT FOR TRADING (accumulation week)\n")
     buf.write(f"# NIFTY score {nt['score']:+.3f} -> regime {out['regime']} "
               f"cap Rs {out['regime_cap']:,}\n")
     if out["ban_list"]:

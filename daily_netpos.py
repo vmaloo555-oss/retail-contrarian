@@ -37,6 +37,23 @@ HIST_KEEP = 20           # readings of new_net history to carry (cols 15..34 = 2
 OUT_DIR = "output"
 HIST_CSV = "archive/netpos_history.csv"
 
+_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun",
+           "jul", "aug", "sep", "oct", "nov", "dec"]
+
+
+def display_name(tag):
+    """Reading tag -> the operator's own feed naming convention.
+       2026-09-08_1130 -> '8 sep-1'   (the 11:30 file)
+       2026-09-08_1430 -> '8 sep-n'   (the 2:30 file)
+    Archive files stay tag-named (they must sort); only delivered files use this.
+    """
+    try:
+        d, slot = tag.split("_")
+        _, mm, dd = d.split("-")
+        return f"{int(dd)} {_MONTHS[int(mm) - 1]}-{'1' if slot == '1130' else 'n'}"
+    except Exception:
+        return tag
+
 
 def posw(strike, spot, typ, flat=False):
     """Option moneyness weight in [POSW_FLOOR, 1.0].  typ 'C'/'P'.  x>0 = ITM."""
@@ -157,7 +174,8 @@ def write_files(reading, rows, hist, status=None):
     head = HEADERS + FILTER_COLS + hist_cols
     ws.append(head)
 
-    csv_path = os.path.join(OUT_DIR, f"netpos_{reading}.csv")
+    name = display_name(reading)
+    csv_path = os.path.join(OUT_DIR, f"netpos {name}.csv")
     cf = open(csv_path, "w", newline="")
     cw = csv.writer(cf)
     cw.writerow(head)
@@ -195,7 +213,7 @@ def write_files(reading, rows, hist, status=None):
     cf.close()
     ws.auto_filter.ref = ws.dimensions          # Excel dropdown filters on header
     ws.freeze_panes = "B2"                       # keep symbol col + header visible
-    xlsx_path = os.path.join(OUT_DIR, f"netpos_{reading}.xlsx")
+    xlsx_path = os.path.join(OUT_DIR, f"netpos {name}.xlsx")
     wb.save(xlsx_path)
     return xlsx_path, csv_path
 
