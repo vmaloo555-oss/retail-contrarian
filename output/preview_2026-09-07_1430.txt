@@ -1,0 +1,19 @@
+# QUIET MODEL PREVIEW 2026-09-07_1430 -- NOT FOR TRADING (accumulation week)
+# NIFTY score +1.300 -> regime extreme-bearish cap Rs 150,000,000
+# ban: SAIL
+# eligible 33   book 13 names   deployed Rs 144,200,000
+
+sym            lots    score   opt_s    conv   Rs value
+INDUSINDBK       42   -0.667   +0.75   0.473   Rs 29,400,000
+APOLLOHOSP       20   -0.882   +0.40   0.426   Rs 14,000,000
+MARICO           22   -0.818   +0.25   0.273   Rs 15,400,000
+LICHSGFIN        22   -0.667   +0.14   0.268   Rs 15,400,000
+AUROPHARMA       20   -0.750   -0.18   0.250   Rs 14,000,000
+IDFCFIRSTB       10   -0.562   +0.10   0.222   Rs 7,000,000
+GRASIM           10   -0.615   -0.61   0.205   Rs 7,000,000
+COALINDIA        10   -0.575   -0.66   0.192   Rs 7,000,000
+UPL              10   -0.479   -0.90   0.160   Rs 7,000,000
+SRF              10   -0.426   +0.60   0.142   Rs 7,000,000
+INOXWIND         10   -0.400   -0.82   0.133   Rs 7,000,000
+JSWENERGY        10   -0.378   -0.09   0.126   Rs 7,000,000
+IDEA             10   -0.310   +0.07   0.126   Rs 7,000,000

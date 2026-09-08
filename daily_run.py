@@ -72,6 +72,43 @@ def price_readings_count():
                     if row and row[0] not in ("reading",)})
 
 
+def _csv_has_tag(path, tag):
+    """True if `path` holds at least one row under reading tag `tag`."""
+    if not os.path.exists(path):
+        return False
+    with open(path, newline="") as f:
+        return any(row and row[0] == tag for row in csv.reader(f))
+
+
+def artifacts(tag):
+    """Per-reading files this run should leave behind.
+
+    (label, path, keep) -- keep="repo" is committed as the accumulation record,
+    keep="drive" is uploaded to the "retail-contrarian-system" output folder.
+    """
+    return [
+        ("strike snapshot", os.path.join(SA.ARCHIVE_DIR, f"{tag}.csv"), "repo"),
+        ("weighted netpos xlsx", os.path.join(DN.OUT_DIR, f"netpos_{tag}.xlsx"), "drive"),
+        ("weighted netpos csv", os.path.join(DN.OUT_DIR, f"netpos_{tag}.csv"), "drive"),
+        ("model preview", os.path.join(DN.OUT_DIR, f"preview_{tag}.txt"), "drive"),
+    ]
+
+
+def verify_persisted(tag):
+    """Check every artifact for `tag` actually landed. Returns (ok, lines).
+
+    The accumulation week is only worth anything if each reading survives the
+    run that produced it -- an ephemeral container loses whatever is not
+    committed or uploaded, so a silent miss here costs a reading permanently.
+    """
+    checks = [(label, path, os.path.exists(path)) for label, path, _ in artifacts(tag)]
+    checks.append(("price archive row", PRICE_CSV, _csv_has_tag(PRICE_CSV, tag)))
+    checks.append(("netpos history row", DN.HIST_CSV, _csv_has_tag(DN.HIST_CSV, tag)))
+    lines = [f"    {'OK ' if got else 'MISSING'}  {label:<20} {path}"
+             for label, path, got in checks]
+    return all(got for _, _, got in checks), lines
+
+
 def write_preview(feed_path, tag, prev_tag):
     path = os.path.join(DN.OUT_DIR, f"preview_{tag}.txt")
     buf = io.StringIO()
@@ -116,6 +153,15 @@ def run(feed_path, tag=None):
     print(f"  weighted netpos : {xlsx}")
     print(f"  model preview   : {preview_path}")
     print(f"  price component : {'READY - >=20 readings, switch price_c on' if n_price >= 20 else f'accumulating ({n_price}/20 readings)'}")
+
+    ok, lines = verify_persisted(tag)
+    print(f"  persistence     : {'all artifacts present' if ok else 'INCOMPLETE - see below'}")
+    for ln in lines:
+        print(ln)
+    print("  next            : commit archive/ + output/, then upload to Drive:")
+    for label, path, keep in artifacts(tag):
+        if keep == "drive":
+            print(f"    -> {path}")
     return tag
 
 

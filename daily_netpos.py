@@ -99,12 +99,22 @@ HIST_FIELDS = ["reading", "symbol", "fut_net", "call_net_w", "put_net_w", "new_n
 
 
 def _append_hist(reading, rows):
+    """Store this reading's rows, replacing any already held under the same tag.
+
+    Re-running a reading must not duplicate it: `_load_hist` would then see the
+    tag twice and the "previous reading" pick would compare a tag against
+    itself. Same de-dup-then-rewrite shape as `daily_run.archive_ltp`.
+    """
     os.makedirs(os.path.dirname(HIST_CSV), exist_ok=True)
-    new = not os.path.exists(HIST_CSV)
-    with open(HIST_CSV, "a", newline="") as f:
+    kept = []
+    if os.path.exists(HIST_CSV):
+        with open(HIST_CSV, newline="") as f:
+            kept = [row for row in csv.reader(f)
+                    if row and row[0] not in ("reading", reading)]
+    with open(HIST_CSV, "w", newline="") as f:
         w = csv.writer(f)
-        if new:
-            w.writerow(HIST_FIELDS)
+        w.writerow(HIST_FIELDS)
+        w.writerows(kept)
         for r in rows:
             w.writerow([reading, r["symbol"], r["fut_net"], r["call_net_w"],
                         r["put_net_w"], r["new_net"]])
