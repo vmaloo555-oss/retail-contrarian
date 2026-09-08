@@ -207,14 +207,23 @@ def verdict(b):
 
 
 def weighted_rows(symbol, strikes, spot, min_net=MIN_NET):
-    """Flat per-strike rows with the moneyness weighting applied, for the
-    `strikes` sheet. One row per symbol x strike."""
+    """Per-strike rows in the operator's own `strike`-sheet pivot layout
+    (RowLabels / b / s / Total, grouped FUT | CO | PO | GrandTotal), with the
+    moneyness weighting applied to the option groups. FUT (strike 0) is weight
+    1.0. Weighted columns are suffixed w; raw counts are kept alongside so the
+    weighting is auditable."""
     bc = flag_broker_calls(strikes, spot)
     out = []
     for k in sorted(strikes):
-        if k == 0:
-            continue
         d = strikes[k]
+        label = f"{symbol}   {k:g}"
+        if k == 0:                                   # futures leg, weight 1.0
+            fb, fs = d["fut_b"], d["fut_s"]
+            out.append([label, symbol, 0, None, 1.0, 1.0,
+                        fb, fs, fb - fs, round(fb - fs, 2),
+                        0, 0, 0, 0.0, 0, 0, 0, 0.0,
+                        round(fb - fs, 2), "FUT leg (weight 1.0)"])
+            continue
         cw, pw = mny_weight(k, spot, "C"), mny_weight(k, spot, "P")
         netc, netp = d["co_b"] - d["co_s"], d["po_b"] - d["po_s"]
         wc, wp = netc * cw, netp * pw
@@ -230,30 +239,44 @@ def weighted_rows(symbol, strikes, spot, min_net=MIN_NET):
             note = "retail short puts -> break down"
         else:
             note = ""
-        out.append([symbol, spot, k, round((k - spot) / spot * 100, 1) if spot else None,
+        out.append([label, symbol, k,
+                    round((k - spot) / spot * 100, 1) if spot else None,
                     round(cw, 3), round(pw, 3),
+                    0, 0, 0, 0.0,                              # no FUT at a strike
                     d["co_b"], d["co_s"], netc, round(wc, 2),
-                    d["po_b"], d["po_s"], netp, round(wp, 2), note])
+                    d["po_b"], d["po_s"], netp, round(wp, 2),
+                    round(wc + wp, 2), note])
     return out
 
 
-WEIGHTED_HEADERS = ["symbol", "spot", "strike", "vs_spot_%", "call_wt", "put_wt",
-                    "callB", "callS", "netC", "wNetC",
-                    "putB", "putS", "netP", "wNetP", "note"]
+WEIGHTED_HEADERS = ["RowLabels", "symbol", "strike", "vs_spot_%",
+                    "call_wt", "put_wt",
+                    "FUT b", "FUT s", "FUT net", "FUT netW",
+                    "CO b", "CO s", "CO net", "CO netW",
+                    "PO b", "PO s", "PO net", "PO netW",
+                    "GrandTotalW", "note"]
 
 
-def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET):
-    """Deterministic contrarian option structure implied by the strike map.
+def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET, netpos_score=None):
+    """Deterministic contrarian option structure for a stock.
 
-    Every retail position is faded -- retail long calls/puts decay (walls),
-    retail short calls/puts get run over (breaks). This is mechanical output
-    from the positioning, NOT a market opinion, and the operator places any
-    order themselves. Structures are defined-risk spreads by default.
+    DIRECTION comes from the NET POSITION trend (`netpos_score`, the same
+    retail-unwind score the book is built on):
+        score <= -0.15  retail unwinding its net-long -> contrarian BULLISH
+        score >= +0.15  retail building  its net-long -> contrarian BEARISH
+        in between      no directional signal -> no trade
+    STRIKES come from the moneyness-weighted strike map (walls and breaks).
+    If netpos_score is None the option chain's own retail_dir is used instead.
+
+    Mechanical output from positioning, NOT a market opinion; the operator
+    places any order themselves. Defined-risk spreads by default.
     """
     bc = flag_broker_calls(strikes, spot)
     b = band(symbol, strikes, spot, min_net, exclude=set(bc))
     ks = sorted(k for k in strikes if k > 0 and k not in bc)
     res = dict(symbol=symbol, spot=spot, floor=b["floor"], ceiling=b["ceiling"],
+               netpos_score=(round(netpos_score, 4)
+                             if netpos_score is not None else None),
                retail_dir=round(b["retail_dir"], 2),
                activity=round(abs(b["call_bias"]) + abs(b["put_bias"]), 2),
                read="", strategy="none", legs="", alt="", caution="")
@@ -280,10 +303,18 @@ def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET):
                    if wc[k] <= -min_net and atm_up is not None and k > atm_up]
     short_puts = [k for k in below
                   if wp[k] <= -min_net and atm_dn is not None and k < atm_dn]
-    rd = b["retail_dir"]
 
-    if rd > 0:                       # retail leaning bearish -> fade -> BULLISH
-        res["read"] = "retail net bearish on options -> contrarian BULLISH"
+    # direction: net-position trend first, option chain only as a fallback
+    if netpos_score is not None:
+        rd = (1.0 if netpos_score <= -0.15
+              else -1.0 if netpos_score >= 0.15 else 0.0)
+        src = f"net pos score {netpos_score:+.3f}"
+    else:
+        rd = b["retail_dir"]
+        src = "option chain"
+
+    if rd > 0:                       # retail unwinding net-long -> BULLISH
+        res["read"] = f"retail UNWINDING net-long ({src}) -> contrarian BULLISH"
         if short_calls:
             tgt = min(short_calls, key=lambda k: wc[k])   # biggest short-call cluster
             res["strategy"] = "Bull call spread - fade retail's short calls"
@@ -296,8 +327,8 @@ def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET):
             res["legs"] = f"Buy {atm_up:g} CE"
         if b["floor"] and atm_dn and b["floor"] < atm_dn:
             res["alt"] = f"Bull put spread: Sell {atm_dn:g} PE / Buy {b['floor']:g} PE"
-    elif rd < 0:                     # retail leaning bullish -> fade -> BEARISH
-        res["read"] = "retail net bullish on options -> contrarian BEARISH"
+    elif rd < 0:                     # retail building net-long -> BEARISH
+        res["read"] = f"retail BUILDING net-long ({src}) -> contrarian BEARISH"
         if short_puts:
             tgt = min(short_puts, key=lambda k: wp[k])    # biggest short-put cluster
             res["strategy"] = "Put debit spread - fade retail's short puts"
@@ -313,9 +344,12 @@ def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET):
             res["alt"] = (f"Bear call spread: Sell {b['ceiling']:g} CE"
                           + (f" / Buy {nxt:g} CE" if nxt else " (uncapped - add a long call)"))
     else:
-        res["read"] = "options neutral"
+        res["read"] = (f"net pos flat ({src}) - no directional signal"
+                       if netpos_score is not None else "options neutral")
 
-    if not res["legs"]:
+    if not res["legs"] and res["read"].endswith("no directional signal"):
+        res["strategy"] = "none"
+    elif not res["legs"]:
         res["strategy"] = "none"
         res["caution"] = "no usable strikes on the required side"
     if bc:
@@ -324,9 +358,9 @@ def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET):
     return res
 
 
-STRATEGY_HEADERS = ["symbol", "spot", "floor", "ceiling", "retail_dir",
-                    "opt_activity", "contrarian read", "strategy", "legs",
-                    "alternative", "caution"]
+STRATEGY_HEADERS = ["symbol", "spot", "netpos_score", "floor", "ceiling",
+                    "retail_dir(opt)", "opt_activity", "contrarian read",
+                    "strategy", "legs", "alternative", "caution"]
 
 
 def snapshot(path, reading_tag):

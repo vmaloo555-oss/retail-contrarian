@@ -232,6 +232,16 @@ def _add_strike_sheets(wb, feed_path):
     strikes = SA.load_strike(feed_path)
     ltp = SA.load_ltp(feed_path)
 
+    # net-position trend per symbol -> drives the strategy direction
+    scores = {}
+    try:
+        from model import trend
+        for r in parse_pos(feed_path, header_rows=2).records:
+            if len(r.net_series) >= 3:
+                scores[r.symbol.upper()] = trend(r.net_series)["score"]
+    except Exception as e:
+        print(f"  (net-pos scores unavailable: {e})")
+
     ws2 = wb.create_sheet("strikes weighted")
     ws2.append(SA.WEIGHTED_HEADERS)
     ws3 = wb.create_sheet("option strategy")
@@ -243,10 +253,11 @@ def _add_strike_sheets(wb, feed_path):
             continue
         for row in SA.weighted_rows(sym, strikes[sym], spot):
             ws2.append(row)
-        s = SA.suggest_strategy(sym, strikes[sym], spot)
-        ws3.append([s["symbol"], s["spot"], s["floor"], s["ceiling"],
-                    s["retail_dir"], s["activity"], s["read"], s["strategy"],
-                    s["legs"], s["alt"], s["caution"]])
+        s = SA.suggest_strategy(sym, strikes[sym], spot,
+                                netpos_score=scores.get(sym))
+        ws3.append([s["symbol"], s["spot"], s["netpos_score"], s["floor"],
+                    s["ceiling"], s["retail_dir"], s["activity"], s["read"],
+                    s["strategy"], s["legs"], s["alt"], s["caution"]])
 
     for w in (ws2, ws3):
         w.auto_filter.ref = w.dimensions
