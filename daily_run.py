@@ -110,12 +110,20 @@ def run(feed_path, tag=None):
     prev = write_preview(feed_path, tag, prev_tag)
     preview_path = prev[0] if isinstance(prev, tuple) else prev
 
+    pdf_path = "(skipped)"
+    try:
+        from strategy_pdf import build as build_pdf
+        pdf_path = build_pdf(xlsx, preview_txt=preview_path)
+    except Exception as e:                    # never let the PDF break the run
+        pdf_path = f"(failed: {e})"
+
     n_price = price_readings_count()
     print(f"[{tag}]  prev_strike={prev_tag}")
     print(f"  strike snapshot : {snap}")
     print(f"  LTP archived    : {nltp} rows  ({n_price} readings total)")
     print(f"  weighted netpos : {xlsx}")
     print(f"  model preview   : {preview_path}")
+    print(f"  strategy PDF    : {pdf_path}")
     print(f"  price component : {'READY - >=20 readings, switch price_c on' if n_price >= 20 else f'accumulating ({n_price}/20 readings)'}")
     return tag
 
