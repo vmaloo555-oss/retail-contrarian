@@ -73,6 +73,17 @@ BROKER_MIN_GROSS = 8     # and gross >= this absolute floor (thin chains are not
                          #   "broker calls" just because one strike dominates)
 ATM_PCT = 0.02           # strikes within +/- this of spot are ATM -> exempt
 
+# A "pin" is only neutral if spot sits roughly BETWEEN retail's two walls. When
+# spot is much closer to one of them, a short strangle at those strikes carries
+# real directional delta (the near leg is ~ATM, the far leg is not) and is a
+# disguised bet, not a range trade. Past this ratio, take the directional side
+# the options read supports instead of pretending it is neutral.
+PIN_SKEW_MAX = 2.0
+
+# Minimum one-sidedness before the option book counts as directional at all:
+# |bull - bear| / (bull + bear). Below this the chain is two-sided -> no trade.
+DIR_MIN_CONVICTION = 0.20
+
 
 def _n(x):
     return 0.0 if x in (None, "") else float(x)
@@ -257,19 +268,38 @@ WEIGHTED_HEADERS = ["RowLabels", "symbol", "strike", "vs_spot_%",
                     "GrandTotalW", "note"]
 
 
+import re as _re_mod
+
+
+def _re_strikes(legs):
+    """Strike numbers appearing in a legs string."""
+    return _re_mod.findall(r"(?:Buy|Sell)\s+([\d.]+)\s+(?:CE|PE)", legs or "")
+
+
 def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET, netpos_score=None):
-    """Deterministic contrarian option structure for a stock.
+    """Two-step contrarian construction. Every output is a DEFINED STRUCTURE -
+    never a single naked long option. If no second leg exists, there is no trade.
 
-    DIRECTION comes from the NET POSITION trend (`netpos_score`, the same
-    retail-unwind score the book is built on):
-        score <= -0.15  retail unwinding its net-long -> contrarian BULLISH
-        score >= +0.15  retail building  its net-long -> contrarian BEARISH
-        in between      no directional signal -> no trade
-    STRIKES come from the moneyness-weighted strike map (walls and breaks).
-    If netpos_score is None the option chain's own retail_dir is used instead.
+    STEP 1 - direction from the option book, in detail. Each retail position is
+    scored on its moneyness-weighted size and then faded:
+        retail LONG  calls -> a bullish bet that decays        -> BEARISH for us
+        retail SHORT puts  -> "it won't fall", gets run over   -> BEARISH for us
+        retail SHORT calls -> "it won't rise", gets run over   -> BULLISH for us
+        retail LONG  puts  -> a bearish bet that decays        -> BULLISH for us
+      bull_pressure = |short calls| + long puts
+      bear_pressure = long calls + |short puts|
+      conviction    = |bull - bear| / total
 
-    Mechanical output from positioning, NOT a market opinion; the operator
-    places any order themselves. Defined-risk spreads by default.
+    STEP 2 - the structure, built on retail's own strikes:
+      BEARISH  -> bear put spread (buy ATM PE, sell their wall below)
+                  else bear call spread (sell their call wall, buy the wing)
+      BULLISH  -> bull call spread (buy ATM CE, sell their wall above)
+                  else bull put spread (sell their put wall, buy the wing)
+      BALANCED -> they are net sellers of premium  -> long strangle (buy it back)
+                  they are net buyers  of premium  -> iron condor (sell it to them)
+
+    Mechanical output from positioning, not a market opinion; the operator
+    places every order.
     """
     bc = flag_broker_calls(strikes, spot)
     b = band(symbol, strikes, spot, min_net, exclude=set(bc))
@@ -279,12 +309,15 @@ def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET, netpos_score=None):
                              if netpos_score is not None else None),
                retail_dir=round(b["retail_dir"], 2),
                activity=round(abs(b["call_bias"]) + abs(b["put_bias"]), 2),
-               read="", strategy="none", legs="", alt="", caution="")
+               bull_pressure=0.0, bear_pressure=0.0, verdict="", conviction=0.0,
+               fav_strike=None, setup="", read="", strategy="none", legs="",
+               alt="", caution="")
     if not ks:
+        res["setup"] = "no chain"
         res["read"] = "no option chain"
         return res
-    act = res["activity"]
-    if act < 3:
+    if res["activity"] < 3:
+        res["setup"] = "thin"
         res["read"] = "chain too thin to fade"
         res["caution"] = "thin chain - ignore"
         return res
@@ -297,69 +330,143 @@ def suggest_strategy(symbol, strikes, spot, min_net=MIN_NET, netpos_score=None):
     below = [k for k in ks if k <= spot]
     atm_up = above[0] if above else None
     atm_dn = below[-1] if below else None
-    # short-side walls must sit STRICTLY beyond the long leg, or the "spread"
-    # collapses to a single strike (zero width, no trade).
-    short_calls = [k for k in above
-                   if wc[k] <= -min_net and atm_up is not None and k > atm_up]
-    short_puts = [k for k in below
-                  if wp[k] <= -min_net and atm_dn is not None and k < atm_dn]
 
-    # direction: net-position trend first, option chain only as a fallback
+    def g(k):
+        return f"{k:g}"
+
+    def up_of(k):
+        return next((x for x in above if x > k), None)
+
+    def dn_of(k):
+        return next((x for x in reversed(below) if x < k), None)
+
+    # ---- STEP 1: direction ---------------------------------------------
+    long_calls = sum(v for v in wc.values() if v > 0)
+    short_calls = sum(-v for v in wc.values() if v < 0)
+    long_puts = sum(v for v in wp.values() if v > 0)
+    short_puts = sum(-v for v in wp.values() if v < 0)
+    bull = short_calls + long_puts
+    bear = long_calls + short_puts
+    tot = bull + bear
+    res["bull_pressure"] = round(bull, 2)
+    res["bear_pressure"] = round(bear, 2)
+    res["conviction"] = round(abs(bull - bear) / tot, 3) if tot > 0 else 0.0
+    res["setup"] = (f"longC {long_calls:.1f} | shortC {short_calls:.1f} | "
+                    f"longP {long_puts:.1f} | shortP {short_puts:.1f}")
+
+    # walls retail bought (they overpaid, it decays -> we sell it)
+    call_walls = sorted([k for k in above if wc[k] >= min_net],
+                        key=lambda k: -wc[k])          # heaviest first
+    put_walls = sorted([k for k in below if wp[k] >= min_net],
+                       key=lambda k: -wp[k])
+    call_wall = call_walls[0] if call_walls else None
+    put_wall = put_walls[0] if put_walls else None
+    # strikes retail sold (their pain point -> price is drawn there)
+    call_pain = min([k for k in above if wc[k] <= -min_net],
+                    key=lambda k: wc[k], default=None)
+    put_pain = min([k for k in below if wp[k] <= -min_net],
+                   key=lambda k: wp[k], default=None)
+
+    # ---- balanced book -> a volatility structure, not a dead end --------
+    if res["conviction"] < DIR_MIN_CONVICTION:
+        res["verdict"] = "balanced"
+        sold = short_calls + short_puts
+        bought = long_calls + long_puts
+        if sold > bought and call_pain and put_pain:
+            res["read"] = (f"two-sided, but retail is a net SELLER of premium "
+                           f"({sold:.1f} vs {bought:.1f}) -> buy back what they sold")
+            res["strategy"] = "Long strangle at retail's own short strikes"
+            res["legs"] = f"Buy {g(call_pain)} CE / Buy {g(put_pain)} PE"
+            res["alt"] = (f"Tighter: long straddle at {g(atm_up)}"
+                          if atm_up else "")
+            res["fav_strike"] = call_pain
+        elif bought >= sold and call_wall and put_wall:
+            w_up, w_dn = up_of(call_wall), dn_of(put_wall)
+            res["read"] = (f"two-sided, but retail is a net BUYER of premium "
+                           f"({bought:.1f} vs {sold:.1f}) -> sell it to them")
+            if w_up and w_dn:
+                res["strategy"] = "Iron condor around retail's own walls"
+                res["legs"] = (f"Sell {g(call_wall)} CE / Buy {g(w_up)} CE / "
+                               f"Sell {g(put_wall)} PE / Buy {g(w_dn)} PE")
+            else:
+                res["strategy"] = "Short strangle at retail's own walls"
+                res["legs"] = f"Sell {g(call_wall)} CE / Sell {g(put_wall)} PE"
+                res["caution"] = "no wing strikes - undefined risk"
+            res["fav_strike"] = call_wall
+        else:
+            res["read"] = (f"bull {bull:.1f} vs bear {bear:.1f} - two-sided and no "
+                           f"usable pair of strikes")
+        return res
+
+    bullish = bull > bear
+    res["verdict"] = "BULLISH" if bullish else "BEARISH"
+    drivers = ([f"short calls {short_calls:.1f}"] if bullish and short_calls > 0 else
+               [f"long calls {long_calls:.1f}"] if not bullish and long_calls > 0 else [])
+    drivers += ([f"long puts {long_puts:.1f}"] if bullish and long_puts > 0 else
+                [f"short puts {short_puts:.1f}"] if not bullish and short_puts > 0 else [])
+
+    # ---- STEP 2: a defined structure on retail's strikes ----------------
+    if bullish:
+        # debit: buy ATM call, sell the wall above (theirs) or their pain strike
+        sell_c = next((k for k in call_walls + ([call_pain] if call_pain else [])
+                       if atm_up is not None and k > atm_up), None)
+        if atm_up is not None and sell_c is not None:
+            res["strategy"] = "Bull call spread (long call spread)"
+            res["legs"] = f"Buy {g(atm_up)} CE / Sell {g(sell_c)} CE"
+            res["fav_strike"] = sell_c
+        elif put_wall is not None and dn_of(put_wall) is not None:
+            res["strategy"] = "Bull put spread (credit)"
+            res["legs"] = f"Sell {g(put_wall)} PE / Buy {g(dn_of(put_wall))} PE"
+            res["fav_strike"] = put_wall
+        # secondary
+        if put_wall is not None and dn_of(put_wall) is not None and "Bull call" in res["strategy"]:
+            res["alt"] = (f"Credit version: Sell {g(put_wall)} PE / "
+                          f"Buy {g(dn_of(put_wall))} PE")
+    else:
+        sell_p = next((k for k in put_walls + ([put_pain] if put_pain else [])
+                       if atm_dn is not None and k < atm_dn), None)
+        if atm_dn is not None and sell_p is not None:
+            res["strategy"] = "Bear put spread (debit)"
+            res["legs"] = f"Buy {g(atm_dn)} PE / Sell {g(sell_p)} PE"
+            res["fav_strike"] = sell_p
+        elif call_wall is not None and up_of(call_wall) is not None:
+            res["strategy"] = "Bear call spread (credit)"
+            res["legs"] = f"Sell {g(call_wall)} CE / Buy {g(up_of(call_wall))} CE"
+            res["fav_strike"] = call_wall
+        if call_wall is not None and up_of(call_wall) is not None and "Bear put" in res["strategy"]:
+            res["alt"] = (f"Credit version: Sell {g(call_wall)} CE / "
+                          f"Buy {g(up_of(call_wall))} CE")
+
+    res["read"] = (f"retail {' + '.join(drivers) or 'net one-sided'} -> fade -> "
+                   f"{'up' if bullish else 'down'}"
+                   + (f"; structure built to {g(res['fav_strike'])}"
+                      if res["fav_strike"] is not None else ""))
+    if not res["legs"]:
+        res["strategy"] = "none"
+        res["caution"] = "no pair of strikes to build a spread - no trade"
+        return res
+
+    ks_in = [float(x) for x in _re_strikes(res["legs"])]
+    if len(ks_in) >= 2:
+        width = abs(max(ks_in) - min(ks_in)) / spot * 100
+        if width > 12:
+            res["caution"] = f"spread is {width:.0f}% wide - low probability"
+
     if netpos_score is not None:
-        rd = (1.0 if netpos_score <= -0.15
-              else -1.0 if netpos_score >= 0.15 else 0.0)
-        src = f"net pos score {netpos_score:+.3f}"
-    else:
-        rd = b["retail_dir"]
-        src = "option chain"
-
-    if rd > 0:                       # retail unwinding net-long -> BULLISH
-        res["read"] = f"retail UNWINDING net-long ({src}) -> contrarian BULLISH"
-        if short_calls:
-            tgt = min(short_calls, key=lambda k: wc[k])   # biggest short-call cluster
-            res["strategy"] = "Bull call spread - fade retail's short calls"
-            res["legs"] = f"Buy {atm_up:g} CE / Sell {tgt:g} CE"
-        elif b["ceiling"] and atm_up and b["ceiling"] > atm_up:
-            res["strategy"] = "Bull call spread - capped at retail's long-call wall"
-            res["legs"] = f"Buy {atm_up:g} CE / Sell {b['ceiling']:g} CE"
-        elif atm_up:
-            res["strategy"] = "Long call"
-            res["legs"] = f"Buy {atm_up:g} CE"
-        if b["floor"] and atm_dn and b["floor"] < atm_dn:
-            res["alt"] = f"Bull put spread: Sell {atm_dn:g} PE / Buy {b['floor']:g} PE"
-    elif rd < 0:                     # retail building net-long -> BEARISH
-        res["read"] = f"retail BUILDING net-long ({src}) -> contrarian BEARISH"
-        if short_puts:
-            tgt = min(short_puts, key=lambda k: wp[k])    # biggest short-put cluster
-            res["strategy"] = "Put debit spread - fade retail's short puts"
-            res["legs"] = f"Buy {atm_dn:g} PE / Sell {tgt:g} PE"
-        elif b["floor"] and atm_dn and b["floor"] < atm_dn:
-            res["strategy"] = "Put debit spread - down to retail's long-put floor"
-            res["legs"] = f"Buy {atm_dn:g} PE / Sell {b['floor']:g} PE"
-        elif atm_dn:
-            res["strategy"] = "Long put"
-            res["legs"] = f"Buy {atm_dn:g} PE"
-        if b["ceiling"] and atm_up and b["ceiling"] >= atm_up:
-            nxt = next((k for k in above if k > b["ceiling"]), None)
-            res["alt"] = (f"Bear call spread: Sell {b['ceiling']:g} CE"
-                          + (f" / Buy {nxt:g} CE" if nxt else " (uncapped - add a long call)"))
-    else:
-        res["read"] = (f"net pos flat ({src}) - no directional signal"
-                       if netpos_score is not None else "options neutral")
-
-    if not res["legs"] and res["read"].endswith("no directional signal"):
-        res["strategy"] = "none"
-    elif not res["legs"]:
-        res["strategy"] = "none"
-        res["caution"] = "no usable strikes on the required side"
+        nb = ("BULLISH" if netpos_score <= -0.15
+              else "BEARISH" if netpos_score >= 0.15 else None)
+        if nb and nb != res["verdict"]:
+            res["caution"] = ((res["caution"] + "; ") if res["caution"] else "") + \
+                f"net pos says {nb} ({netpos_score:+.2f}) - options disagree"
     if bc:
-        res["caution"] = (res["caution"] + "; " if res["caution"] else "") + \
+        res["caution"] = ((res["caution"] + "; ") if res["caution"] else "") + \
             "broker-call cluster omitted at " + ", ".join(f"{k:g}" for k in sorted(bc))
     return res
 
 
-STRATEGY_HEADERS = ["symbol", "spot", "netpos_score", "floor", "ceiling",
-                    "retail_dir(opt)", "opt_activity", "contrarian read",
+STRATEGY_HEADERS = ["symbol", "spot", "netpos_score", "opt_activity",
+                    "bull_pressure", "bear_pressure", "verdict", "conviction",
+                    "fav_strike", "activity breakdown", "contrarian read",
                     "strategy", "legs", "alternative", "caution"]
 
 

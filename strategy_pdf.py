@@ -63,7 +63,12 @@ def _read(xlsx):
     ix = {h: i for i, h in enumerate(hdr)}
     rows = []
     for r in ws.iter_rows(min_row=2, values_only=True):
-        rows.append({h: r[i] for h, i in ix.items()})
+        d = {h: r[i] for h, i in ix.items()}
+        # the sheet header is "setup (retail strike map)" - normalise it
+        for h in list(d):
+            if isinstance(h, str) and h.startswith("setup"):
+                d["setup"] = d[h]
+        rows.append(d)
     wb.close()
     return rows
 
@@ -81,16 +86,23 @@ def build(xlsx, out_pdf=None, preview_txt=None):
     def actionable(r):
         return bool(r.get("legs")) and r.get("strategy") not in (None, "", "none")
 
-    bull = [r for r in rows if actionable(r) and "BULLISH" in (r.get("contrarian read") or "")]
-    bear = [r for r in rows if actionable(r) and "BEARISH" in (r.get("contrarian read") or "")]
-    bull.sort(key=lambda r: r.get("netpos_score") or 0)              # deepest unwind first
-    bear.sort(key=lambda r: -(r.get("netpos_score") or 0))           # biggest build first
+    GROUPS = [
+        ("BEARISH", "Retail's option book is net BULLISH here - long calls that "
+                    "decay and short puts that get run over. Fade it short."),
+        ("BULLISH", "Retail's option book is net BEARISH here - short calls that "
+                    "get run over and long puts that decay. Fade it long."),
+    ]
+    groups = {k: [] for k, _ in GROUPS}
+    for r in rows:
+        if actionable(r) and (r.get("verdict") or "") in groups:
+            groups[r["verdict"]].append(r)
+    for k in groups:
+        groups[k].sort(key=lambda r: -(float(r.get("conviction") or 0)))
     thin = sum(1 for r in rows if "thin" in (r.get("contrarian read") or ""))
-    flat = sum(1 for r in rows if "flat" in (r.get("contrarian read") or ""))
     nochain = sum(1 for r in rows if "no option chain" in (r.get("contrarian read") or ""))
+    flat = sum(1 for r in rows if (r.get("verdict") or "") == "balanced")
     nolegs = sum(1 for r in rows if not actionable(r)
-                 and ("BULL" in (r.get("contrarian read") or "")
-                      or "BEAR" in (r.get("contrarian read") or "")))
+                 and (r.get("verdict") or "") in ("BULLISH", "BEARISH"))
 
     regime = ""
     if preview_txt and os.path.exists(preview_txt):
@@ -122,9 +134,9 @@ def build(xlsx, out_pdf=None, preview_txt=None):
 
     doc.addPageTemplates([PageTemplate(id="p", frames=[frame], onPage=furniture)])
 
-    COLS = [28 * mm, 18 * mm, 16 * mm, 15 * mm, 15 * mm, 56 * mm, 60 * mm, 60 * mm]
-    HEAD = ["Symbol", "Spot", "Net pos", "Floor", "Ceiling", "Structure",
-            "Legs", "Alternative"]
+    COLS = [24 * mm, 16 * mm, 14 * mm, 44 * mm, 46 * mm, 46 * mm, 38 * mm, 40 * mm]
+    HEAD = ["Symbol", "Spot", "Conv", "Retail's option book (weighted)",
+            "What it means", "Legs", "Alternative", "Caution"]
 
     def section(title, data, accent, accent_bg, blurb):
         if not data:
@@ -140,14 +152,13 @@ def build(xlsx, out_pdf=None, preview_txt=None):
             body.append([
                 Paragraph(f"<b>{esc(r['symbol'])}</b>", BODY),
                 Paragraph(_fmt(r.get("spot")), BODY),
-                Paragraph(_fmt(r.get("netpos_score"), 3), BODY),
-                Paragraph(_fmt(r.get("floor"), 0), SMALL),
-                Paragraph(_fmt(r.get("ceiling"), 0), SMALL),
-                Paragraph(esc(r.get("strategy")), BODY),
+                Paragraph(_fmt(r.get("conviction"), 2), BODY),
+                Paragraph(esc(r.get("activity breakdown")), SMALL),
+                Paragraph(esc(r.get("contrarian read")), SMALL),
                 Paragraph(esc(r.get("legs")), LEGS),
-                Paragraph(esc(r.get("alternative")) +
-                          (f"<br/><font color='#B3341F'>{esc(r['caution'])}</font>"
-                           if r.get("caution") else ""), SMALL)])
+                Paragraph(esc(r.get("alternative")), SMALL),
+                Paragraph(f"<font color='#B3341F'>{esc(r.get('caution'))}</font>"
+                          if r.get("caution") else "", SMALL)])
         t = Table(body, colWidths=COLS, repeatRows=1)
         st = [("VALIGN", (0, 0), (-1, -1), "TOP"),
               ("TOPPADDING", (0, 0), (-1, -1), 3.2),
@@ -170,19 +181,20 @@ def build(xlsx, out_pdf=None, preview_txt=None):
                        f"{dt.datetime.now():%d %b %Y %H:%M} IST"
                        + (f" &nbsp;·&nbsp; {regime}" if regime else ""), SUB),
              Spacer(1, 5 * mm)]
-    story += section("CONTRARIAN BULLISH", bull, BULL, BULL_BG,
-                     "Retail is <b>unwinding</b> its net-long (net pos score ≤ −0.15). "
-                     "Fade it long. Strikes taken from the moneyness-weighted chain.")
-    story += section("CONTRARIAN BEARISH", bear, BEAR, BEAR_BG,
-                     "Retail is <b>building</b> its net-long (net pos score ≥ +0.15). "
-                     "Fade it short. Strikes taken from the moneyness-weighted chain.")
+    PALETTE = {"BEARISH": (BEAR, BEAR_BG), "BULLISH": (BULL, BULL_BG)}
+    actionable_n = 0
+    for key, blurb in GROUPS:
+        data = groups[key]
+        actionable_n += len(data)
+        acc, bg = PALETTE[key]
+        story += section(key, data, acc, bg, blurb)
 
     tot = len(rows)
     excl = Table([[Paragraph(
-        f"<b>Not shown</b> &nbsp; {thin} thin option chain &nbsp;·&nbsp; {flat} net pos flat "
-        f"(no directional signal) &nbsp;·&nbsp; {nolegs} direction but no usable strikes "
+        f"<b>Not shown</b> &nbsp; {thin} thin option chain &nbsp;·&nbsp; {flat} balanced book, "
+        f"two-sided (no edge) &nbsp;·&nbsp; {nolegs} direction but no usable strikes "
         f"&nbsp;·&nbsp; {nochain} no chain &nbsp; — of {tot} symbols, "
-        f"<b>{len(bull) + len(bear)} actionable</b>.", SMALL)]],
+        f"<b>{actionable_n} actionable</b>.", SMALL)]],
         colWidths=[sum(COLS)])
     excl.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), BAND),
                               ("LEFTPADDING", (0, 0), (-1, -1), 6),

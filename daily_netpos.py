@@ -255,8 +255,9 @@ def _add_strike_sheets(wb, feed_path):
             ws2.append(row)
         s = SA.suggest_strategy(sym, strikes[sym], spot,
                                 netpos_score=scores.get(sym))
-        ws3.append([s["symbol"], s["spot"], s["netpos_score"], s["floor"],
-                    s["ceiling"], s["retail_dir"], s["activity"], s["read"],
+        ws3.append([s["symbol"], s["spot"], s["netpos_score"], s["activity"],
+                    s["bull_pressure"], s["bear_pressure"], s["verdict"], s["conviction"],
+                    s["fav_strike"], s["setup"], s["read"],
                     s["strategy"], s["legs"], s["alt"], s["caution"]])
 
     for w in (ws2, ws3):
