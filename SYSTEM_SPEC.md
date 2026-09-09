@@ -251,3 +251,41 @@ the operator manually vetoes names not trending up.
   flat→hold-only, unwinding→OK with `price_c = 0`.
 - `price_c` magnitude (0..1 strength curve for the 'up' case) is still TBD
   before go-live.
+
+## Delivery (as of 2026-09-09)
+`daily_run.py FEED.xlsx --tag <tag>` is the single entry point. Per reading it
+writes, into `output/`, named in the operator's convention (`9 sep-1` = 11:30,
+`9 sep-n` = 14:30):
+
+| file | size | goes to |
+|---|---|---|
+| `netpos <name>.xlsx` (3 sheets: netpos · strikes weighted · option strategy) | ~280 KB | git only |
+| `strategy <name>.pdf` | ~24 KB | git only |
+| `netpos <name>.csv` | ~33 KB | git only |
+| `strategy <name>.csv` | ~46 KB | git only |
+| **`summary <name>.csv`** | ~15 KB | **Google Drive** + git |
+| **`preview <name>.txt`** | ~1.5 KB | **Google Drive** + git |
+
+**Drive gets text only, and only the two compact files.** The connector's
+`create_file` passes content as base64 through the model's context: a 33 KB
+xlsx becomes 47 KB of base64 and hangs the run, and even the two full CSVs
+(81 KB combined) hung runs on 2026-09-08/09. `summary <name>.csv` replaces both
+for Drive — one row per symbol that has either a recommended structure or a
+live book position, columns: symbol · LTP · NEW_NET · DIFF · fut_score ·
+opt_verdict · opt_conv · structure · legs · alternative · caution · in_book ·
+lots. The full detail stays in the repo.
+
+Drive output folder: `retail-contrarian-system`, id
+`1yl6JGsAx7TOi34-2Lme10p3aoUmPpvKy`. Feed folder: `position`, id
+`19krMYOT8MaziQAbkOPhr8Y9OrjUBD85y`.
+
+### Automation
+Two claude.ai routines poll the feed folder on alternating half-hours, weekdays:
+watcher A `15 6-10 * * 1-5` UTC (11:45/12:45/13:45/14:45/15:45 IST) and
+watcher B `45 5-9 * * 1-5` UTC (11:15/12:15/13:15/14:15/15:15 IST). One hour is
+the platform minimum per routine, so two offset routines give ~30-minute
+latency from upload to Drive. Each fire does a cheap check first — list both
+Drive folders, and if every feed already has a matching `summary <name>` it
+reports "nothing new" and exits before cloning. Otherwise it clones the public
+repo, reprocesses EVERY feed file (no saved state, self-healing), and delivers
+the missing readings oldest-first.
