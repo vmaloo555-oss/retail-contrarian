@@ -217,6 +217,8 @@ def write_files(reading, rows, hist, status=None, feed_path=None):
     ws_strat = _add_strike_sheets(wb, feed_path)
     if ws_strat is not None:      # small, text-only -> uploadable to Drive
         _write_sheet_csv(ws_strat, os.path.join(OUT_DIR, f"strategy {name}.csv"))
+        _write_summary(os.path.join(OUT_DIR, f"summary {name}.csv"), rows,
+                       status, ws_strat)
 
     xlsx_path = os.path.join(OUT_DIR, f"netpos {name}.xlsx")
     wb.save(xlsx_path)
@@ -264,6 +266,37 @@ def _add_strike_sheets(wb, feed_path):
         w.auto_filter.ref = w.dimensions
         w.freeze_panes = "B2"
     return ws3
+
+
+SUMMARY_COLS = ["symbol", "LTP", "NEW_NET", "DIFF", "fut_score", "opt_verdict",
+                "opt_conv", "structure", "legs", "alternative", "caution",
+                "in_book", "lots"]
+
+
+def _write_summary(path, rows, status, ws_strat):
+    """One compact row per symbol - the daily digest. Deliberately small so it
+    can be uploaded to Drive in a single call; the full detail lives in the
+    .xlsx. Only symbols with a structure or a book position are included."""
+    hdr = [c.value for c in ws_strat[1]]
+    strat = {}
+    for r in ws_strat.iter_rows(min_row=2, values_only=True):
+        d = dict(zip(hdr, r))
+        strat[str(d.get("symbol"))] = d
+    by_sym = {r["symbol"]: r for r in rows}
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(SUMMARY_COLS)
+        for sym in sorted(by_sym):
+            r = by_sym[sym]
+            st = status.get(sym, {})
+            d = strat.get(sym, {})
+            if not (d.get("legs") or st.get("in_book")):
+                continue                      # nothing to say about this name
+            w.writerow([sym, r["ltp"], r["new_net"], "", st.get("fut_score", ""),
+                        d.get("verdict", ""), d.get("conviction", ""),
+                        d.get("strategy", ""), d.get("legs", ""),
+                        d.get("alternative", ""), d.get("caution", ""),
+                        st.get("in_book", ""), st.get("book_lots", "")])
 
 
 def _write_sheet_csv(ws, path):
