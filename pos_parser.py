@@ -19,8 +19,11 @@ sheet is in the path you give it.
    15  retail NET POSITION (current)  ==  (3 - 4) + (7 - 8) + (12 - 11)
    16  net position (previous)
    17  DIFF                          <- ignored
-   18..34  net-position history, newest -> oldest (~2 readings / trading day)
-   >34     ignored
+   18..N   net-position history, newest -> oldest (~2 readings / trading day).
+           N is the last column whose date header is a date, capped at 34.
+           Some exports append deltas / a repeated symbol / a price / a %
+           change straight after the history; those are NOT history.
+   >N      ignored
 
 Public contract
 ---------------
@@ -33,7 +36,7 @@ PosFeed.warnings : list[str], non-fatal data-quality notes
 SymbolRecord fields:
     symbol      : str
     ltp         : float | None
-    net_series  : list[float]   # [col 15] + cols 18..34, newest first, blanks dropped
+    net_series  : list[float]   # [col 15] + the dated history cols, newest first
   (plus diagnostics: row, sector, net_current, net_current_expected, verified)
 
 CLI
@@ -51,6 +54,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
@@ -135,7 +139,7 @@ class SymbolRecord:
     symbol: str
     sector: Optional[str]
     ltp: Optional[float]
-    net_series: list               # [col 15] + cols 18..34, newest first, blanks dropped
+    net_series: list               # [col 15] + dated history cols, newest first
     net_current: Optional[float]   # raw col 15
     net_current_expected: Optional[float]
     verified: bool                 # col 15 matched the formula within tol
@@ -211,6 +215,43 @@ def _detect_header_rows(rows) -> int:
     return n
 
 
+_DATE_TEXT = re.compile(r"^\s*\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\s*$")
+
+
+def _is_date_header(v) -> bool:
+    import datetime as _dt
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return True
+    return isinstance(v, str) and bool(_DATE_TEXT.match(v))
+
+
+def _hist_end(rows, hr: int) -> int:
+    """Last real history column.
+
+    The history block starts at COL_HIST_START and runs while the date header
+    row still carries a date. Some exports append unrelated columns straight
+    after it (deltas, a repeated symbol, a price, a % change); walking blindly
+    to COL_HIST_END swallows those and a fractional % change then becomes the
+    oldest 'position', which blows up every trend score. Stop at the first
+    non-date header instead. Falls back to COL_HIST_END if no header is found,
+    and never reads past it.
+    """
+    hdr = None
+    for i in range(min(hr, len(rows))):
+        r = rows[i] or ()
+        if len(r) > COL_HIST_START and _is_date_header(r[COL_HIST_START]):
+            hdr = r
+            break
+    if hdr is None:
+        return COL_HIST_END
+    end = COL_HIST_START
+    for c in range(COL_HIST_START, min(len(hdr), COL_HIST_END + 1)):
+        if not _is_date_header(hdr[c]):
+            break
+        end = c
+    return end
+
+
 def parse_pos(path, sheet: str = SHEET_DEFAULT, header_rows="auto",
               tol: float = 1e-6) -> PosFeed:
     """Load the `pos` sheet, verify col 15 on every row, return a PosFeed.
@@ -238,7 +279,12 @@ def parse_pos(path, sheet: str = SHEET_DEFAULT, header_rows="auto",
         wb.close()
 
     hr = _detect_header_rows(rows) if header_rows == "auto" else int(header_rows)
+    hist_end = _hist_end(rows, hr)
     feed = PosFeed(path=str(p), sheet=sheet, header_rows=hr)
+    if hist_end < COL_HIST_END:
+        feed.warnings.append(
+            f"history block ends at column {hist_end} (not {COL_HIST_END}); "
+            f"columns {hist_end + 1}..{COL_HIST_END} are not dated and were ignored")
 
     seen = {}
     any_net_present = False
@@ -309,7 +355,7 @@ def parse_pos(path, sheet: str = SHEET_DEFAULT, header_rows="auto",
 
         # --- net-position series: [col 15] + cols 18..34, blanks dropped, order kept ---
         series = []
-        for c in (COL_NET_CUR, *range(COL_HIST_START, COL_HIST_END + 1)):
+        for c in (COL_NET_CUR, *range(COL_HIST_START, hist_end + 1)):
             val, _ = _num(r[c])
             if val is not None:
                 series.append(val)
