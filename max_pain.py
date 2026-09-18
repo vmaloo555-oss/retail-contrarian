@@ -71,6 +71,26 @@ def value_at(chain, S):
     return v
 
 
+def fut_leg(chain):
+    """(long, short) count on the futures/cash leg, stored at strike 0."""
+    d = chain.get(0.0) or chain.get(0) or {}
+    return d.get("fut_b", 0.0), d.get("fut_s", 0.0)
+
+
+def fut_losers_at(chain, S, spot):
+    """Futures positions losing at settlement S.
+
+    NOTE a different baseline from the option count: options are judged on
+    expiry intrinsic against their own strike, futures have no strike and we
+    do not get entry prices, so they are judged against TODAY'S spot - i.e.
+    "loses if it moves from here to S". Reported separately for that reason.
+    """
+    fb, fs = fut_leg(chain)
+    if not spot or S == spot:
+        return 0.0
+    return fb if S < spot else fs
+
+
 def total_positions(chain):
     return sum(d["co_b"] + d["co_s"] + d["po_b"] + d["po_s"]
                for k, d in chain.items() if k > 0)
@@ -89,6 +109,7 @@ def _pick(scored, spot, want_max):
 
 COLS = ["symbol", "spot", "PAIN_STRIKE", "pct_from_spot", "losers_at_pain",
         "total_positions", "pct_losing", "losers_at_spot", "extra_losers",
+        "fut_long", "fut_short", "fut_losers_at_pain", "losers_incl_fut",
         "VALUE_STRIKE", "net_book_value_at_value_strike", "edge", "n_strikes"]
 
 
@@ -109,6 +130,8 @@ def analyse(feed, strike_sheet="strike", pos_sheet="pos"):
         vstrike, vval = _pick([(k, value_at(chain, k)) for k in ks], spot, False)
 
         at_spot = losers_at(chain, spot) if spot else None
+        fb, fs = fut_leg(chain)
+        fut_lose = fut_losers_at(chain, pain, spot)
         rows.append({
             "symbol": sym,
             "spot": spot,
@@ -121,6 +144,10 @@ def analyse(feed, strike_sheet="strike", pos_sheet="pos"):
             "losers_at_spot": round(at_spot, 1) if at_spot is not None else None,
             "extra_losers": (round(n_lose - at_spot, 1)
                              if at_spot is not None else None),
+            "fut_long": round(fb, 1),
+            "fut_short": round(fs, 1),
+            "fut_losers_at_pain": round(fut_lose, 1),
+            "losers_incl_fut": round(n_lose + fut_lose, 1),
             "VALUE_STRIKE": vstrike,
             "net_book_value_at_value_strike": round(vval, 1),
             # the minimum sitting on the first/last strike means the true answer
@@ -148,11 +175,12 @@ def main():
     rows.sort(key=lambda r: -(r["losers_at_pain"] or 0))
     print(f"{len(rows)} symbols -> {out}")
     print(f"{'symbol':<12}{'spot':>10}{'PAIN':>10}{'from spot':>11}"
-          f"{'losing':>8}{'of':>7}{'%':>7}  edge")
+          f"{'losing':>8}{'of':>7}{'%':>7}{'+fut':>7}  edge")
     for r in rows[:a.top]:
         print(f"{r['symbol']:<12}{r['spot'] or 0:>10.2f}{r['PAIN_STRIKE']:>10g}"
               f"{(r['pct_from_spot'] or 0):>10.1f}%{r['losers_at_pain']:>8.0f}"
-              f"{r['total_positions']:>7.0f}{r['pct_losing']:>6.0f}%  {r['edge']}")
+              f"{r['total_positions']:>7.0f}{r['pct_losing']:>6.0f}%"
+              f"{r['losers_incl_fut']:>7.0f}  {r['edge']}")
 
 
 if __name__ == "__main__":
